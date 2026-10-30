@@ -1,0 +1,65 @@
+#!/bin/bash
+# Set up an isolated company laptop:
+#   curl -fsSL https://ilyak.sh | bash
+# Extra flags go to bootstrap:
+#   curl -fsSL https://ilyak.sh | bash -s -- --russian
+# This file is public and holds no secrets. A personal Mac grants read access
+# to the configs repo with `accept-laptop <code>`.
+
+configs=git@github.com:ikhrustalev/configs.git
+repo="$HOME/Dev/configs"
+key="$HOME/.ssh/id_ed25519"
+# Published by GitHub. Pinned so the first connection cannot be intercepted.
+github_host_key="github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+
+can_read() {
+  GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10" git ls-remote "$configs" HEAD >/dev/null 2>&1
+}
+
+request_access() {
+  # The code is a hash of the key, so accept-laptop can reject a swapped key.
+  local code
+  code="$(awk '{print $2}' "$key.pub" | tr -d '\n' | shasum -a 256 | cut -c1-12)"
+
+  if ! curl -fsS -m 15 -d "$(cat "$key.pub")" "https://ntfy.sh/ilyak-$code" >/dev/null; then
+    echo "Could not post the key. Add it as a deploy key by hand:"
+    cat "$key.pub"
+  fi
+
+  echo
+  echo "Give this code to your Mac:  $code"
+  echo "Then run:  accept-laptop $code"
+  echo
+  echo "Waiting for access..."
+  until can_read; do
+    sleep 5
+  done
+}
+
+# Everything runs from here, so a cut-off download does nothing.
+main() {
+  set -euo pipefail
+
+  if [ ! -x /opt/homebrew/bin/brew ]; then
+    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" </dev/tty
+  fi
+  eval "$(/opt/homebrew/bin/brew shellenv)"
+
+  mkdir -p ~/.ssh
+  chmod 700 ~/.ssh
+  [ -f "$key" ] || ssh-keygen -t ed25519 -N "" -f "$key" -C "$(scutil --get LocalHostName)" >/dev/null
+  grep -qxF "$github_host_key" ~/.ssh/known_hosts 2>/dev/null || echo "$github_host_key" >> ~/.ssh/known_hosts
+
+  can_read || request_access
+
+  if [ ! -d "$repo/.git" ]; then
+    git clone --filter=blob:none --sparse "$configs" "$repo"
+    git -C "$repo" sparse-checkout set bin git ghostty macos shell
+  fi
+  git -C "$repo" pull --ff-only || echo "Could not update configs, using the local copy."
+
+  # stdin is this script, so prompts must read from the terminal.
+  exec "$repo/bootstrap" --isolated --slack "$@" </dev/tty
+}
+
+main "$@"
